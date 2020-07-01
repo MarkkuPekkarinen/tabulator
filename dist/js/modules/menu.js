@@ -1,9 +1,11 @@
-/* Tabulator v4.6.3 (c) Oliver Folkerd */
+/* Tabulator v4.7.1 (c) Oliver Folkerd */
 
 var Menu = function Menu(table) {
 	this.table = table; //hold Tabulator object
 	this.menuEl = false;
 	this.blurEvent = this.hideMenu.bind(this);
+	this.escEvent = this.escMenu.bind(this);
+	this.nestedMenuBlock = false;
 };
 
 Menu.prototype.initializeColumnHeader = function (column) {
@@ -45,7 +47,9 @@ Menu.prototype.initializeCell = function (cell) {
 	cell.getElement().addEventListener("contextmenu", function (e) {
 		var menu = typeof cell.column.definition.contextMenu == "function" ? cell.column.definition.contextMenu(cell.getComponent()) : cell.column.definition.contextMenu;
 
-		e.preventDefault();
+		if (menu) {
+			e.stopImmediatePropagation();
+		}
 
 		_this2.loadMenu(e, cell, menu);
 	});
@@ -57,20 +61,41 @@ Menu.prototype.initializeRow = function (row) {
 	row.getElement().addEventListener("contextmenu", function (e) {
 		var menu = typeof _this3.table.options.rowContextMenu == "function" ? _this3.table.options.rowContextMenu(row.getComponent()) : _this3.table.options.rowContextMenu;
 
-		e.preventDefault();
-
 		_this3.loadMenu(e, row, menu);
 	});
 };
 
-Menu.prototype.loadMenu = function (e, component, menu) {
+Menu.prototype.initializeGroup = function (group) {
 	var _this4 = this;
 
+	group.getElement().addEventListener("contextmenu", function (e) {
+		var menu = typeof _this4.table.options.groupContextMenu == "function" ? _this4.table.options.groupContextMenu(group.getComponent()) : _this4.table.options.groupContextMenu;
+
+		_this4.loadMenu(e, group, menu);
+	});
+};
+
+Menu.prototype.loadMenu = function (e, component, menu) {
+	var _this5 = this;
+
 	var docHeight = Math.max(document.body.offsetHeight, window.innerHeight);
+
+	e.preventDefault();
 
 	//abort if no menu set
 	if (!menu || !menu.length) {
 		return;
+	}
+
+	if (this.nestedMenuBlock) {
+		//abort if child menu already open
+		if (this.isOpen()) {
+			return;
+		}
+	} else {
+		this.nestedMenuBlock = setTimeout(function () {
+			_this5.nestedMenuBlock = false;
+		}, 100);
 	}
 
 	this.hideMenu();
@@ -109,13 +134,13 @@ Menu.prototype.loadMenu = function (e, component, menu) {
 				});
 			} else {
 				itemEl.addEventListener("click", function (e) {
-					_this4.hideMenu();
+					_this5.hideMenu();
 					item.action(e, component.getComponent());
 				});
 			}
 		}
 
-		_this4.menuEl.appendChild(itemEl);
+		_this5.menuEl.appendChild(itemEl);
 	});
 
 	this.menuEl.style.top = e.pageY + "px";
@@ -125,8 +150,10 @@ Menu.prototype.loadMenu = function (e, component, menu) {
 	this.table.rowManager.element.addEventListener("scroll", this.blurEvent);
 
 	setTimeout(function () {
-		document.body.addEventListener("contextmenu", _this4.blurEvent);
+		document.body.addEventListener("contextmenu", _this5.blurEvent);
 	}, 100);
+
+	document.body.addEventListener("keydown", this.escEvent);
 
 	document.body.appendChild(this.menuEl);
 
@@ -143,9 +170,23 @@ Menu.prototype.loadMenu = function (e, component, menu) {
 	}
 };
 
+Menu.prototype.isOpen = function () {
+	return !!this.menuEl.parentNode;
+};
+
+Menu.prototype.escMenu = function (e) {
+	if (e.keyCode == 27) {
+		this.hideMenu();
+	}
+};
+
 Menu.prototype.hideMenu = function () {
 	if (this.menuEl.parentNode) {
 		this.menuEl.parentNode.removeChild(this.menuEl);
+	}
+
+	if (this.escEvent) {
+		document.body.removeEventListener("keydown", this.escEvent);
 	}
 
 	if (this.blurEvent) {

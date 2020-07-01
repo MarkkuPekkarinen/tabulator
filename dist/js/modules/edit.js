@@ -1,6 +1,6 @@
 var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
-/* Tabulator v4.6.3 (c) Oliver Folkerd */
+/* Tabulator v4.7.1 (c) Oliver Folkerd */
 
 var Edit = function Edit(table) {
 	this.table = table; //hold Tabulator object
@@ -8,6 +8,7 @@ var Edit = function Edit(table) {
 	this.mouseClick = false; //hold mousedown state to prevent click binding being overriden by editor opening
 	this.recursionBlock = false; //prevent focus recursion
 	this.invalidEdit = false;
+	this.editedCells = [];
 };
 
 //initialize column editor
@@ -72,7 +73,7 @@ Edit.prototype.getCurrentCell = function () {
 	return this.currentCell ? this.currentCell.getComponent() : false;
 };
 
-Edit.prototype.clearEditor = function () {
+Edit.prototype.clearEditor = function (cancel) {
 	var cell = this.currentCell,
 	    cellEl;
 
@@ -82,7 +83,13 @@ Edit.prototype.clearEditor = function () {
 		this.currentCell = false;
 
 		cellEl = cell.getElement();
-		cellEl.classList.remove("tabulator-validation-fail");
+
+		if (cancel) {
+			cell.validate();
+		} else {
+			cellEl.classList.remove("tabulator-validation-fail");
+		}
+
 		cellEl.classList.remove("tabulator-editing");
 		while (cellEl.firstChild) {
 			cellEl.removeChild(cellEl.firstChild);
@@ -96,7 +103,7 @@ Edit.prototype.cancelEdit = function () {
 		var cell = this.currentCell;
 		var component = this.currentCell.getComponent();
 
-		this.clearEditor();
+		this.clearEditor(true);
 		cell.setValueActual(cell.getValue());
 		cell.cellRendered();
 
@@ -159,6 +166,24 @@ Edit.prototype.focusScrollAdjust = function (cell) {
 				this.table.rowManager.element.scrollTop += rowEl.offsetTop + rowEl.offsetHeight - bottomEdge;
 			}
 		}
+
+		var leftEdge = this.table.rowManager.element.scrollLeft,
+		    rightEdge = this.table.rowManager.element.clientWidth + this.table.rowManager.element.scrollLeft,
+		    cellEl = cell.getElement(),
+		    offset = cellEl.offsetLeft;
+
+		if (this.table.modExists("frozenColumns")) {
+			leftEdge += parseInt(this.table.modules.frozenColumns.leftMargin);
+			rightEdge -= parseInt(this.table.modules.frozenColumns.rightMargin);
+		}
+
+		if (cellEl.offsetLeft < leftEdge) {
+			this.table.rowManager.element.scrollLeft -= leftEdge - cellEl.offsetLeft;
+		} else {
+			if (cellEl.offsetLeft + cellEl.offsetWidth > rightEdge) {
+				this.table.rowManager.element.scrollLeft += cellEl.offsetLeft + cellEl.offsetWidth - rightEdge;
+			}
+		}
 	}
 };
 
@@ -184,16 +209,32 @@ Edit.prototype.edit = function (cell, e, forceEdit) {
 		if (self.currentCell === cell) {
 			var valid = true;
 
-			if (cell.column.modules.validate && self.table.modExists("validate")) {
-				valid = self.table.modules.validate.validate(cell.column.modules.validate, cell.getComponent(), value);
+			if (cell.column.modules.validate && self.table.modExists("validate") && self.table.options.validationMode != "manual") {
+				valid = self.table.modules.validate.validate(cell.column.modules.validate, cell, value);
 			}
 
-			if (valid === true) {
+			if (valid === true || self.table.options.validationMode === "highlight") {
 				self.clearEditor();
 				cell.setValue(value, true);
 
+				if (!cell.modules.edit) {
+					cell.modules.edit = {};
+				}
+
+				cell.modules.edit.edited = true;
+
+				if (self.editedCells.indexOf(cell) == -1) {
+					self.editedCells.push(cell);
+				}
+
 				if (self.table.options.dataTree && self.table.modExists("dataTree")) {
 					self.table.modules.dataTree.checkForRestyle(cell);
+				}
+
+				if (valid !== true) {
+					element.classList.add("tabulator-validation-fail");
+					self.table.options.validationFailed.call(self.table, cell.getComponent(), value, valid);
+					return false;
 				}
 
 				return true;
@@ -393,6 +434,30 @@ Edit.prototype.maskInput = function (el, options) {
 
 	if (options.maskAutoFill) {
 		fillSymbols(el.value.length);
+	}
+};
+
+Edit.prototype.getEditedCells = function () {
+	var output = [];
+
+	this.editedCells.forEach(function (cell) {
+		output.push(cell.getComponent());
+	});
+
+	return output;
+};
+
+Edit.prototype.clearEdited = function (cell) {
+	var editIndex;
+
+	if (cell.modules.validate && cell.modules.edit && cell.modules.edit.edited) {
+		cell.modules.validate.invalid = false;
+
+		editIndex = this.editedCells.indexOf(cell);
+
+		if (editIndex > -1) {
+			this.editedCells.splice(editIndex, 1);
+		}
 	}
 };
 
@@ -737,7 +802,7 @@ Edit.prototype.editors = {
 		input.addEventListener("keydown", function (e) {
 			switch (e.keyCode) {
 				case 13:
-				case 9:
+					// case 9:
 					onChange();
 					break;
 
@@ -752,19 +817,22 @@ Edit.prototype.editors = {
 
 	//select
 	select: function select(cell, onRendered, success, cancel, editorParams) {
+		var _this = this;
+
 		var self = this,
 		    cellEl = cell.getElement(),
 		    initialValue = cell.getValue(),
 		    vertNav = editorParams.verticalNavigation || "editor",
-		    initialDisplayValue = typeof initialValue !== "undefined" || initialValue === null ? initialValue : typeof editorParams.defaultValue !== "undefined" ? editorParams.defaultValue : "",
+		    initialDisplayValue = typeof initialValue !== "undefined" || initialValue === null ? Array.isArray(initialValue) ? initialValue : [initialValue] : typeof editorParams.defaultValue !== "undefined" ? editorParams.defaultValue : [],
 		    input = document.createElement("input"),
 		    listEl = document.createElement("div"),
+		    multiselect = editorParams.multiselect,
 		    dataItems = [],
-		    displayItems = [],
 		    currentItem = {},
-		    blurable = true;
-
-		this.table.rowManager.element.addEventListener("scroll", cancelItem);
+		    displayItems = [],
+		    currentItems = [],
+		    blurable = true,
+		    blockListShow = false;
 
 		if (Array.isArray(editorParams) || !Array.isArray(editorParams) && (typeof editorParams === "undefined" ? "undefined" : _typeof(editorParams)) === "object" && !editorParams.values) {
 			console.warn("DEPRECATION WARNING - values for the select editor must now be passed into the values property of the editorParams object, not as the editorParams object");
@@ -807,19 +875,25 @@ Edit.prototype.editors = {
 			return output;
 		}
 
-		function parseItems(inputValues, curentValue) {
+		function parseItems(inputValues, curentValues) {
 			var dataList = [];
 			var displayList = [];
 
 			function processComplexListItem(item) {
 				var item = {
-					label: editorParams.listItemFormatter ? editorParams.listItemFormatter(item.value, item.label) : item.label,
+					label: item.label,
 					value: item.value,
+					itemParams: item.itemParams,
+					elementAttributes: item.elementAttributes,
 					element: false
 				};
 
-				if (item.value === curentValue || !isNaN(parseFloat(item.value)) && !isNaN(parseFloat(item.value)) && parseFloat(item.value) === parseFloat(curentValue)) {
-					setCurrentItem(item);
+				// if(item.value === curentValue || (!isNaN(parseFloat(item.value)) && !isNaN(parseFloat(item.value)) && parseFloat(item.value) === parseFloat(curentValue))){
+				// 	setCurrentItem(item);
+				// }
+
+				if (curentValues.indexOf(item.value) > -1) {
+					setItem(item);
 				}
 
 				dataList.push(item);
@@ -842,6 +916,8 @@ Edit.prototype.editors = {
 							item = {
 								label: value.label,
 								group: true,
+								itemParams: value.itemParams,
+								elementAttributes: value.elementAttributes,
 								element: false
 							};
 
@@ -856,13 +932,17 @@ Edit.prototype.editors = {
 					} else {
 
 						item = {
-							label: editorParams.listItemFormatter ? editorParams.listItemFormatter(value, value) : value,
+							label: value,
 							value: value,
 							element: false
 						};
 
-						if (item.value === curentValue || !isNaN(parseFloat(item.value)) && !isNaN(parseFloat(item.value)) && parseFloat(item.value) === parseFloat(curentValue)) {
-							setCurrentItem(item);
+						// if(item.value === curentValue || (!isNaN(parseFloat(item.value)) && !isNaN(parseFloat(item.value)) && parseFloat(item.value) === parseFloat(curentValue))){
+						// 	setCurrentItem(item);
+						// }
+
+						if (curentValues.indexOf(item.value) > -1) {
+							setItem(item);
 						}
 
 						dataList.push(item);
@@ -872,13 +952,17 @@ Edit.prototype.editors = {
 			} else {
 				for (var key in inputValues) {
 					var item = {
-						label: editorParams.listItemFormatter ? editorParams.listItemFormatter(key, inputValues[key]) : inputValues[key],
+						label: inputValues[key],
 						value: key,
 						element: false
 					};
 
-					if (item.value === curentValue || !isNaN(parseFloat(item.value)) && !isNaN(parseFloat(item.value)) && parseFloat(item.value) === parseFloat(curentValue)) {
-						setCurrentItem(item);
+					// if(item.value === curentValue || (!isNaN(parseFloat(item.value)) && !isNaN(parseFloat(item.value)) && parseFloat(item.value) === parseFloat(curentValue))){
+					// 	setCurrentItem(item);
+					// }
+
+					if (curentValues.indexOf(item.value) > -1) {
+						setItem(item);
 					}
 
 					dataList.push(item);
@@ -896,31 +980,57 @@ Edit.prototype.editors = {
 			while (listEl.firstChild) {
 				listEl.removeChild(listEl.firstChild);
 			}displayItems.forEach(function (item) {
+
 				var el = item.element;
 
 				if (!el) {
-
+					el = document.createElement("div");
+					item.label = editorParams.listItemFormatter ? editorParams.listItemFormatter(item.value, item.label, cell, el, item.itemParams) : item.label;
 					if (item.group) {
-						el = document.createElement("div");
 						el.classList.add("tabulator-edit-select-list-group");
 						el.tabIndex = 0;
 						el.innerHTML = item.label === "" ? "&nbsp;" : item.label;
 					} else {
-						el = document.createElement("div");
 						el.classList.add("tabulator-edit-select-list-item");
 						el.tabIndex = 0;
 						el.innerHTML = item.label === "" ? "&nbsp;" : item.label;
 
 						el.addEventListener("click", function () {
-							setCurrentItem(item);
-							chooseItem();
+							blockListShow = true;
+
+							setTimeout(function () {
+								blockListShow = false;
+							}, 10);
+
+							// setCurrentItem(item);
+							// chooseItem();
+							if (multiselect) {
+								toggleItem(item);
+								input.focus();
+							} else {
+								chooseItem(item);
+							}
 						});
 
-						if (item === currentItem) {
+						// if(item === currentItem){
+						// 	el.classList.add("active");
+						// }
+
+						if (currentItems.indexOf(item) > -1) {
 							el.classList.add("active");
 						}
 					}
 
+					if (item.elementAttributes && _typeof(item.elementAttributes) == "object") {
+						for (var key in item.elementAttributes) {
+							if (key.charAt(0) == "+") {
+								key = key.slice(1);
+								el.setAttribute(key, input.getAttribute(key) + item.elementAttributes["+" + key]);
+							} else {
+								el.setAttribute(key, item.elementAttributes[key]);
+							}
+						}
+					}
 					el.addEventListener("mousedown", function () {
 						blurable = false;
 
@@ -936,28 +1046,130 @@ Edit.prototype.editors = {
 			});
 		}
 
-		function setCurrentItem(item) {
+		function setCurrentItem(item, active) {
 
-			if (currentItem && currentItem.element) {
+			if (!multiselect && currentItem && currentItem.element) {
 				currentItem.element.classList.remove("active");
 			}
 
+			if (currentItem && currentItem.element) {
+				currentItem.element.classList.remove("focused");
+			}
+
 			currentItem = item;
-			input.value = item.label === "&nbsp;" ? "" : item.label;
 
 			if (item.element) {
-				item.element.classList.add("active");
+				item.element.classList.add("focused");
+				if (active) {
+					item.element.classList.add("active");
+				}
 			}
 		}
 
-		function chooseItem() {
+		// function chooseItem(){
+		// 	hideList();
+
+		// 	if(initialValue !== currentItem.value){
+		// 		initialValue = currentItem.value;
+		// 		success(currentItem.value);
+		// 	}else{
+		// 		cancel();
+		// 	}
+		// }
+
+		function setItem(item) {
+			var index = currentItems.indexOf(item);
+
+			if (index == -1) {
+				currentItems.push(item);
+				setCurrentItem(item, true);
+			}
+
+			fillInput();
+		}
+
+		function unsetItem(index) {
+			var item = currentItems[index];
+
+			if (index > -1) {
+				currentItems.splice(index, 1);
+				if (item.element) {
+					item.element.classList.remove("active");
+				}
+			}
+		}
+
+		function toggleItem(item) {
+			if (!item) {
+				item = currentItem;
+			}
+
+			var index = currentItems.indexOf(item);
+
+			if (index > -1) {
+				unsetItem(index);
+			} else {
+				if (multiselect !== true && currentItems.length >= multiselect) {
+					unsetItem(0);
+				}
+
+				setItem(item);
+			}
+
+			fillInput();
+		}
+
+		function chooseItem(item) {
 			hideList();
 
-			if (initialValue !== currentItem.value) {
-				initialValue = currentItem.value;
-				success(currentItem.value);
-			} else {
-				cancel();
+			if (!item) {
+				item = currentItem;
+			}
+
+			if (item) {
+				input.value = item.label;
+				success(item.value);
+			}
+
+			initialDisplayValue = input.value;
+		}
+
+		function chooseItems(silent) {
+			if (!silent) {
+				hideList();
+			}
+
+			var output = [];
+
+			currentItems.forEach(function (item) {
+				output.push(item.value);
+			});
+
+			initialDisplayValue = input.value;
+
+			success(output);
+		}
+
+		function fillInput() {
+			var output = [];
+
+			currentItems.forEach(function (item) {
+				output.push(item.label);
+			});
+
+			input.value = output.join(", ");
+
+			if (self.currentCell === false) {
+				chooseItems(true);
+			}
+		}
+
+		function unsetItems() {
+
+			var len = currentItems.length;
+
+			for (var i = 0; i < len; i++) {
+				unsetItem(0);
 			}
 		}
 
@@ -967,8 +1179,9 @@ Edit.prototype.editors = {
 		}
 
 		function showList() {
-			if (!listEl.parentNode) {
+			currentItems = [];
 
+			if (!listEl.parentNode) {
 				if (editorParams.values === true) {
 					parseItems(getUniqueColumnValues(), initialDisplayValue);
 				} else if (typeof editorParams.values === "string") {
@@ -1038,6 +1251,13 @@ Edit.prototype.editors = {
 		// 	parseItems(editorParams.values || [], initialValue);
 		// }
 
+		input.addEventListener("search", function (e) {
+			if (!input.value) {
+				unsetItems();
+				chooseItems();
+			}
+		});
+
 		//allow key based navigation
 		input.addEventListener("keydown", function (e) {
 			var index;
@@ -1053,7 +1273,7 @@ Edit.prototype.editors = {
 						e.preventDefault();
 
 						if (index > 0) {
-							setCurrentItem(dataItems[index - 1]);
+							setCurrentItem(dataItems[index - 1], !multiselect);
 						}
 					}
 					break;
@@ -1069,9 +1289,9 @@ Edit.prototype.editors = {
 
 						if (index < dataItems.length - 1) {
 							if (index == -1) {
-								setCurrentItem(dataItems[0]);
+								setCurrentItem(dataItems[0], !multiselect);
 							} else {
-								setCurrentItem(dataItems[index + 1]);
+								setCurrentItem(dataItems[index + 1], !multiselect);
 							}
 						}
 					}
@@ -1087,24 +1307,46 @@ Edit.prototype.editors = {
 
 				case 13:
 					//enter
-					chooseItem();
+					// chooseItem();
+
+					if (multiselect) {
+						toggleItem();
+					} else {
+						chooseItem();
+					}
+
 					break;
 
 				case 27:
 					//escape
 					cancelItem();
 					break;
+
+				case 9:
+					//tab
+					break;
+
+				default:
+					if (self.currentCell === false) {
+						e.preventDefault();
+					}
 			}
 		});
 
 		input.addEventListener("blur", function (e) {
 			if (blurable) {
-				cancelItem();
+				if (multiselect) {
+					chooseItems();
+				} else {
+					cancelItem();
+				}
 			}
 		});
 
 		input.addEventListener("focus", function (e) {
-			showList();
+			if (!blockListShow) {
+				showList();
+			}
 		});
 
 		//style list element
@@ -1116,11 +1358,17 @@ Edit.prototype.editors = {
 			input.focus({ preventScroll: true });
 		});
 
+		setTimeout(function () {
+			_this.table.rowManager.element.addEventListener("scroll", cancelItem);
+		}, 10);
+
 		return input;
 	},
 
 	//autocomplete
 	autocomplete: function autocomplete(cell, onRendered, success, cancel, editorParams) {
+		var _this2 = this;
+
 		var self = this,
 		    cellEl = cell.getElement(),
 		    initialValue = cell.getValue(),
@@ -1132,9 +1380,8 @@ Edit.prototype.editors = {
 		    displayItems = [],
 		    values = [],
 		    currentItem = false,
-		    blurable = true;
-
-		this.table.rowManager.element.addEventListener("scroll", cancelItem);
+		    blurable = true,
+		    uniqueColumnValues = false;
 
 		//style input
 		input.setAttribute("type", "search");
@@ -1164,6 +1411,14 @@ Edit.prototype.editors = {
 				blurable = true;
 			}, 10);
 		});
+
+		function genUniqueColumnValues() {
+			if (editorParams.values === true) {
+				uniqueColumnValues = getUniqueColumnValues();
+			} else if (typeof editorParams.values === "string") {
+				uniqueColumnValues = getUniqueColumnValues(editorParams.values);
+			}
+		}
 
 		function getUniqueColumnValues(field) {
 			var output = {},
@@ -1208,10 +1463,8 @@ Edit.prototype.editors = {
 			    searchEl;
 
 			//lookup base values list
-			if (editorParams.values === true) {
-				values = getUniqueColumnValues();
-			} else if (typeof editorParams.values === "string") {
-				values = getUniqueColumnValues(editorParams.values);
+			if (uniqueColumnValues) {
+				values = uniqueColumnValues;
 			} else {
 				values = editorParams.values || [];
 			}
@@ -1276,10 +1529,16 @@ Edit.prototype.editors = {
 
 			if (Array.isArray(inputValues)) {
 				inputValues.forEach(function (value) {
-					var item = {
-						title: editorParams.listItemFormatter ? editorParams.listItemFormatter(value, value) : value,
-						value: value
-					};
+
+					var item = {};
+
+					if ((typeof value === "undefined" ? "undefined" : _typeof(value)) === "object") {
+						item.title = editorParams.listItemFormatter ? editorParams.listItemFormatter(value.value, value.label) : value.label;
+						item.value = value.value;
+					} else {
+						item.title = editorParams.listItemFormatter ? editorParams.listItemFormatter(value, value) : value;
+						item.value = value;
+					}
 
 					itemList.push(item);
 				});
@@ -1481,7 +1740,7 @@ Edit.prototype.editors = {
 					//right arrow
 					e.stopImmediatePropagation();
 					e.stopPropagation();
-					e.preventDefault();
+					// e.preventDefault();
 					break;
 
 				case 13:
@@ -1532,6 +1791,7 @@ Edit.prototype.editors = {
 
 		input.addEventListener("focus", function (e) {
 			var value = initialDisplayValue;
+			genUniqueColumnValues();
 			showList();
 			input.value = value;
 			filterList(value, true);
@@ -1546,10 +1806,14 @@ Edit.prototype.editors = {
 			this.table.modules.edit.maskInput(input, editorParams);
 		}
 
+		setTimeout(function () {
+			_this2.table.rowManager.element.addEventListener("scroll", cancelItem);
+		}, 10);
+
 		return input;
 	},
 
-	//start rating
+	//star rating
 	star: function star(cell, onRendered, success, cancel, editorParams) {
 		var self = this,
 		    element = cell.getElement(),
@@ -1606,6 +1870,7 @@ Edit.prototype.editors = {
 				e.stopPropagation();
 				e.stopImmediatePropagation();
 				success(i);
+				element.blur();
 			});
 
 			starHolder.appendChild(nextStar);

@@ -219,6 +219,7 @@ Sort.prototype.sort = function(data){
 	var self = this,
 	sortList = this.table.options.sortOrderReverse ? self.sortList.slice().reverse() : self.sortList,
 	sortListActual = [],
+	rowComponents = [],
 	lastSort;
 
 	if(self.table.options.dataSorting){
@@ -260,7 +261,11 @@ Sort.prototype.sort = function(data){
 	}
 
 	if(self.table.options.dataSorted){
-		self.table.options.dataSorted.call(self.table, self.getSort(), self.table.rowManager.getComponents("active"));
+		data.forEach((row) => {
+			rowComponents.push(row.getComponent());
+		});
+
+		self.table.options.dataSorted.call(self.table, self.getSort(), rowComponents);
 	}
 
 };
@@ -398,10 +403,10 @@ Sort.prototype.sorters = {
 		return this.sorters.datetime.call(this, a, b, aRow, bRow, column, dir, params);
 	},
 
-	//sort hh:mm formatted times
+	//sort HH:mm formatted times
 	time:function(a, b, aRow, bRow, column, dir, params){
 		if(!params.format){
-			params.format = "hh:mm";
+			params.format = "HH:mm";
 		}
 
 		return this.sorters.datetime.call(this, a, b, aRow, bRow, column, dir, params);
@@ -409,7 +414,7 @@ Sort.prototype.sorters = {
 
 	//sort datetime
 	datetime:function(a, b, aRow, bRow, column, dir, params){
-		var format = params.format || "DD/MM/YYYY hh:mm:ss",
+		var format = params.format || "DD/MM/YYYY HH:mm:ss",
 		alignEmptyValues = params.alignEmptyValues,
 		emptyAlign = 0;
 
